@@ -1,25 +1,31 @@
 #include <Wire.h>
-#include <Adafruit_LSM303.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_LSM303_U.h>
 #include <Adafruit_NeoPixel.h>
 #define LEDPIN 9
-Adafruit_LSM303 lsm;
 
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(6, LEDPIN, NEO_GRB + NEO_KHZ800);
+/* Assign a unique ID to this sensor at the same time */
+Adafruit_LSM303_Mag_Unified mag = Adafruit_LSM303_Mag_Unified(12345);
+Adafruit_LSM303_Accel_Unified accel = Adafruit_LSM303_Accel_Unified(54321);
 
-const uint8_t smoothFactor = 10;
+
+const uint8_t smoothFactor = 5;
 uint8_t currPixel = 0;
 // accelerometer data stores
-short accXVals[smoothFactor];
-short accYVals[smoothFactor];
-short accZVals[smoothFactor];
-short magXVals[smoothFactor];
-short magYVals[smoothFactor];
-short magZVals[smoothFactor];
+int accXVals[smoothFactor];
+int accYVals[smoothFactor];
+int accZVals[smoothFactor];
+int magXVals[smoothFactor];
+int magYVals[smoothFactor];
+int magZVals[smoothFactor];
 
 long lastToggleTime = 0;
-int toggleInterval = 100;
-int accLastToggleTime = 0;
-int accToggleInterval = 250;
+int toggleInterval = 300;
+long accLastToggleTime = 0;
+int accToggleInterval = 1000;
+
+sensors_event_t event;
 
 // https://learn.adafruit.com/led-tricks-gamma-correction/the-quick-fix
 const uint8_t PROGMEM gamma[] = {
@@ -42,12 +48,25 @@ const uint8_t PROGMEM gamma[] = {
 
 void setup() 
 {
-  Serial.begin(9600);  
+  Serial.begin(9600); 
+  
+  /* Enable auto-gain */
+  //mag.enableAutoRange(true);  
+  
   // Try to initialise and warn if we couldn't detect the chip
-  if (!lsm.begin())
+  if (!mag.begin() )
   {
     Serial.println("Oops ... unable to initialize the LSM303. Check your wiring!");
     while (1);
+  }
+
+
+  /* Initialise the sensor */
+  if(!accel.begin())
+  {
+    /* There was a problem detecting the LSM303 ... check your connections */
+    Serial.println("Ooops, no LSM303 detected ... Check your wiring!");
+    while(1);
   }
   
   // init strip
@@ -63,36 +82,103 @@ void setup()
     magYVals[i]=0;
     magZVals[i]=0;
   }
+  
+  sensor_t sensor;
+  mag.getSensor(&sensor);
+  accel.getSensor(&sensor);
+  
 }
 
-void pushVal(short vals[], short val){
+void pushVal(int vals[], int val){
   for(uint8_t i=1; i<smoothFactor; i++){
     vals[i-1] = vals[i];
   }
   vals[smoothFactor-1] = val;
 }
 
-short getAvg(short vals[]) {
+int getAvg(int vals[]) {
   int total = 0;
   for(uint8_t i=0; i<smoothFactor; i++){
     total = total + vals[i];
   }
-  return (short) total/smoothFactor;
+  return (int) total/smoothFactor;
 }
 
 void setCorrectedColor(uint8_t pixel, uint8_t r, uint8_t g, uint8_t b){
   strip.setPixelColor(pixel, pgm_read_byte(&gamma[r]), pgm_read_byte(&gamma[g]), pgm_read_byte(&gamma[b]));
 }
 
-void getMovementData(){
-  lsm.read();
+void getAccelData(){
+  /* Get a new sensor event */ 
+  sensors_event_t event; 
+  accel.getEvent(&event);
   
-  pushVal(accXVals, (short) lsm.accelData.x);
-  pushVal(accYVals, (short) lsm.accelData.y);
-  pushVal(accZVals, (short) lsm.accelData.z);
-  pushVal(magXVals, (short) lsm.magData.x);
-  pushVal(magYVals, (short) lsm.magData.y);
-  pushVal(magZVals, (short) lsm.magData.z);
+  pushVal(accXVals, (int) event.acceleration.x);
+  pushVal(accYVals, (int) event.acceleration.y);
+  pushVal(accZVals, (int) event.acceleration.z);
+  
+}
+
+float getJerk(int vals[]){
+  float avg = getAvg(vals);
+  float dev = 0;
+  for(uint8_t i=0; i<smoothFactor; i++){
+    dev += abs( vals[i] - avg );
+  }
+  return (float) dev/smoothFactor;
+}
+
+void getMagData(){
+  /* Get a new sensor event */ 
+  sensors_event_t event; 
+  mag.getEvent(&event);
+
+  pushVal(magXVals, (int) event.magnetic.x);
+  pushVal(magYVals, (int) event.magnetic.y);
+  pushVal(magZVals, (int) event.magnetic.z); 
+}
+
+uint8_t getColorValue(int accData, int jerk){
+  Serial.println(jerk);
+  return (uint8_t) map( 
+    constrain( abs(accData) * (0.25 + constrain(jerk, 0, 10)), 0, 30),
+    0, 
+    50, 
+    25, 
+    255
+  );
+}
+
+void fadePixel(uint8_t i, uint8_t toR, uint8_t toG, uint8_t toB){
+  uint32_t c = strip.getPixelColor(i);
+  uint8_t
+    fromR = (uint8_t)(c >> 16),
+    fromG = (uint8_t)(c >>  8),
+    fromB = (uint8_t) c;
+    
+  uint8_t cycles = 10;
+  uint8_t cycleIndex = 0;
+    
+  int fadeInterval = (int) toggleInterval / cycles;
+  long lastFadeTime = 0;
+  while(cycleIndex < cycles){
+    if(millis() - lastFadeTime > fadeInterval){
+      lastFadeTime = millis();
+
+      cycleIndex++;
+      
+      // do color stuff
+      setCorrectedColor( i, map(cycleIndex, 1, cycles, fromR, toR), map(cycleIndex, 1, cycles, fromG, toG), map(cycleIndex, 1, cycles, fromB, toB) );
+      
+    }
+  }
+  
+}
+
+void loop() {
+  
+  getAccelData();
+  getMagData();
   
 //  if(millis() - accLastToggleTime > accToggleInterval){
 //    accLastToggleTime = millis();
@@ -101,38 +187,43 @@ void getMovementData(){
 //    Serial.print("Z: "); Serial.println(getAvg(accZVals));     Serial.print(" ");
 //    Serial.print("Mag X: "); Serial.print(getAvg(magXVals));     Serial.print(" ");
 //    Serial.print("Y: "); Serial.print(getAvg(magYVals));         Serial.print(" ");
-//    Serial.print("Z: "); Serial.println(getAvg(magZVals));       Serial.print(" ");    
+//    Serial.print("Z: "); Serial.println(getAvg(magZVals));       Serial.print(" ");  
 //  }
-
-}
-
-uint8_t getColorValue(short magData, short accData){
-  return (uint8_t) map( constrain(magData, -400, 700), -700, 700, 0, map( constrain(accData, -2000, 2000), -2000, 2000, 150, 255 ) );
-}
-
-void loop() {
   
-  getMovementData();
+  // set toggleInterval based on Z orientation
+  toggleInterval = (int) map( constrain(getAvg(magZVals), -80, 10), -80, 10, 120, 80 );
   
   if(millis() - lastToggleTime > toggleInterval){
     lastToggleTime = millis();
-    uint8_t prevPixel = currPixel > 0 ? currPixel-1 : strip.numPixels()-1;
+    uint8_t trailingPixel = currPixel > 0 ? currPixel-1 : strip.numPixels()-1;
+    uint8_t fadeOutPixel = trailingPixel > 0 ? trailingPixel-1 : strip.numPixels()-1;
+  
+    uint8_t
+      movementR = getColorValue(getAvg(accXVals), getJerk(accXVals)),
+      movementG = getColorValue(getAvg(accYVals), getJerk(accYVals)),
+      movementB = getColorValue(getAvg(accZVals), getJerk(accZVals));
   
     for(uint8_t i=0; i<strip.numPixels(); i++){
       uint8_t r = 0;
       uint8_t g = 0;
       uint8_t b = 0;
+      
       if(i == currPixel){
         // full color
-        r = getColorValue(getAvg(magXVals), getAvg(accXVals));
-        g = getColorValue(getAvg(magYVals), getAvg(accYVals));
-        b = getColorValue(getAvg(magZVals), getAvg(accZVals));
-      } else if(i == prevPixel){
+        r = movementR;
+        g = movementG;
+        b = movementB;
+      } else if(i == trailingPixel){
         // trailing color
-        r = (uint8_t) getColorValue( getAvg(magXVals), getAvg(accXVals) / 2 );
-        g = (uint8_t) getColorValue( getAvg(magYVals), getAvg(accYVals) / 2 );
-        b = (uint8_t) getColorValue( getAvg(magZVals), getAvg(accZVals) / 2 );
+        r = (int) movementR/2;
+        g = (int) movementG/2;
+        b = (int) movementB/2;
+      } else if(i == fadeOutPixel){
+        r = (int) movementR/4;
+        g = (int) movementG/4;
+        b = (int) movementB/4;      
       }
+
       setCorrectedColor(i, r, g, b);
       strip.show();
     }
